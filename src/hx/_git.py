@@ -73,6 +73,20 @@ def is_work_tree(path: Path) -> bool:
     return rc == 0 and out.strip() == "true"
 
 
+def work_tree_root(path: Path) -> Path | None:
+    """Resolved top level of the work tree containing ``path``, or ``None``.
+
+    Git is asked (``rev-parse --show-toplevel``) instead of probing for a ``.git``
+    entry, so a subdirectory of a checkout never looks like a repository root,
+    while a linked work tree still reports its own root.
+    """
+    rc, out, _ = git(["rev-parse", "--show-toplevel"], cwd=path, check=False)
+    top = str(out).strip()
+    if rc != 0 or not top:
+        return None
+    return Path(top).resolve()
+
+
 def head_sha(repo: Path) -> str:
     _, out, _ = git(["rev-parse", "HEAD"], cwd=repo)
     return out.strip()
@@ -98,6 +112,12 @@ def clone(source: Path, dest: Path, base: str, timeout: float = 600.0) -> None:
     ``dest`` must not exist yet. Object files are copied (``--no-hardlinks``) so
     the clone does not share the source object store.
     """
+    top = work_tree_root(source)
+    if top is not None and top != Path(source).resolve():
+        raise GitError(
+            f"clone source {source} is a subdirectory of the work tree {top}; "
+            "clone the work tree root instead"
+        )
     git(
         [
             "-c",

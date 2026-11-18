@@ -51,6 +51,40 @@ class BoundaryTest(unittest.TestCase):
             run(repo, [S.PY, "-c", "pass"], S.VERIFY_TRUE, runs_root=target)
         self.assertFalse(target.exists())
 
+    def test_nested_source_is_rejected_before_any_run_artifact(self):
+        """A subdirectory of a checkout is refused by comparing it with Git's toplevel."""
+        sb = S.Sandbox()
+        self.addCleanup(sb.cleanup)
+        repo = sb.new_repo()
+        runs = sb.runs_root()
+        nested = repo / "tests"
+        inside_runs = repo / "runs"
+        before = S.snapshot(repo)
+
+        with self.assertRaisesRegex(HxError, "subdirectory"):
+            run(nested, [S.PY, "-c", "pass"], S.VERIFY_TRUE, runs_root=runs)
+        self.assertEqual([p.name for p in runs.iterdir()], [])
+
+        # the containment check used to trust the supplied path, so a runs_root
+        # under the real repository root slipped through: still nothing created.
+        with self.assertRaisesRegex(HxError, "subdirectory"):
+            run(nested, [S.PY, "-c", "pass"], S.VERIFY_TRUE, runs_root=inside_runs)
+        self.assertFalse(inside_runs.exists())
+        self.assertEqual([p.name for p in runs.iterdir()], [])
+        self.assertEqual(S.snapshot(repo), before)
+
+        # the work tree root itself is still accepted, and so is a linked work tree
+        res = run(repo, [S.PY, "-c", "pass"], S.VERIFY_TRUE, runs_root=runs)
+        self.assertTrue(res.work_dir.is_dir())
+        self.assertEqual([p.name for p in runs.iterdir()], [res.run_id])
+
+        linked = sb.path("linked-worktree")
+        _git.git(["worktree", "add", "--detach", str(linked), "HEAD"], cwd=repo)
+        self.assertEqual(_git.work_tree_root(linked), linked.resolve())
+        linked_run = run(linked, [S.PY, "-c", "pass"], S.VERIFY_TRUE, runs_root=runs)
+        self.assertTrue(linked_run.work_dir.is_dir())
+        self.assertEqual(len([p.name for p in runs.iterdir()]), 2)
+
     def test_timeout_kills_a_descendant_holding_output_pipes(self):
         with tempfile.TemporaryDirectory() as temporary:
             marker = Path(temporary) / "escaped.txt"

@@ -231,8 +231,14 @@ def run(
     if not source.is_dir():
         raise HxError(f"source path is not a directory: {source}")
     source = source.resolve()
-    if not _git.is_work_tree(source):
+    top = _git.work_tree_root(source)
+    if top is None:
         raise HxError(f"not a git work tree: {source}")
+    if top != source:
+        raise HxError(
+            f"{source} is a subdirectory of the git work tree at {top}: hx runs on the "
+            "repository root so the isolated clone covers the whole checkout"
+        )
     try:
         base = _git.head_sha(source)
     except GitError as exc:
