@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="540" height="102" viewBox="0 0 540 102" role="img" aria-labelledby="title desc">
+  <title id="title">A patch in the margins</title>
+  <desc id="desc">A little diff reveals the profile motto.</desc>
+  <style>
+    .label { font: 13px system-ui,sans-serif; fill: #e9f2ff; }
+    .code { font: 11px ui-monospace,monospace; fill: #a7d4ff; }
+    .track { fill: none; stroke: #5475a2; stroke-width: 1.5; }
+    .sweep{animation:sweep 4.2s ease-in-out infinite alternate}.ink{animation:ink 4.2s ease-in-out infinite alternate}@keyframes sweep{0%,12%{transform:translateX(0)}84%,100%{transform:translateX(362px)}}@keyframes ink{0%,24%{opacity:.5}72%,100%{opacity:1}}
+    @media (prefers-reduced-motion: reduce) { .motion { animation: none !important; } }
+  </style>
+  <rect x="1" y="1" width="538" height="100" rx="12" fill="#111d35" stroke="#33507a"/>
+  <rect x="24" y="18" width="492" height="66" rx="7" fill="#182940" stroke="#476891"/>
+    <text class="code" x="42" y="39">@@ -97 +97 @@</text>
+    <path d="M41 47h458" stroke="#4c6d93"/>
+    <text class="motion ink code" x="42" y="69">+ Think deep, don't sink.</text>
+    <rect class="motion sweep" x="41" y="76" width="70" height="2" rx="1" fill="#86dcc9"/>
+</svg>

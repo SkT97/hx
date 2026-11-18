@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hx"
+version = "0.1.0"
+description = "Verifier-first delegation for command-line coding agents"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+
+[project.scripts]
+hx = "hx.cli:main"
+
+[dependency-groups]
+dev = ["ruff>=0.17,<0.18"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hx"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
