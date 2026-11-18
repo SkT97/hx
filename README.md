@@ -24,7 +24,9 @@ The offline demo creates a disposable Git fixture, blocks an agent that only cla
   <img src="assets/workflow.svg" alt="A coding agent works in a local clone. Verification clears a patch for review and explicit acceptance.">
 </picture>
 
-A failed verifier blocks acceptance. A passing verifier leaves a patch for you to inspect and apply explicitly. Git clone isolation does not sandbox the agent.
+A failed verifier blocks acceptance. hx compares the Git patch before and after verification. If the verifier changes it, the run remains inspectable and accept is blocked. Ignored build output is fine.
+
+Review the verified patch before applying it. Both Git apply calls use the same digest-checked bytes. To accept a run recorded by an older version, rerun verification with this version. Git clone isolation does not sandbox the agent.
 
 <details>
 <summary>Run your own agent and review a patch</summary>
@@ -54,7 +56,7 @@ The recorded local suite covers failed verification, timeouts, changed source HE
 <details>
 <summary>Local verification and implementation choices</summary>
 
-Checked locally on Windows, 16 November 2026. The test suite covers source fingerprints before/after runs, verifier failures, timeout cleanup including a child holding output pipes, new-file patches, changed HEAD, dirty targets, digest mismatches and forwarded-value redaction. See [verification](docs/verification.md) for executed commands and limits.
+Checked locally on Windows, 18 November 2026. The 49 tests cover patch changes during verification, legacy run records, bounded output capture, timeout cleanup and source integrity. See [verification](docs/verification.md) for commands and limits.
 
 The demo is a correctness check of the delegation loop. It is not a coding-model benchmark or a claim of improved task success.
 
@@ -83,7 +85,7 @@ uv run --locked ruff format --check .
 
 Git isolation is **not an OS security boundary**. An agent running as you can access your files and network, change its clone configuration, or tamper with a verifier. Use an OS/container boundary and a trusted external verifier for untrusted agents.
 
-On POSIX, a descendant that creates a new session can leave the tracked process group. Output tails are bounded in the record, but subprocess output is buffered in memory. Known forwarded values are masked; this is not a general secret detector, and the patch may contain sensitive content. Inspect and scan artifacts before sharing them.
+On POSIX, a descendant that creates a new session can leave the tracked process group. Both subprocess streams are drained concurrently, with only a bounded tail kept in memory and in the record. Known forwarded values are masked; this is not a general secret detector, and the patch may contain sensitive content. Inspect and scan artifacts before sharing them.
 
 A digest detects accidental patch changes relative to the local record; someone who can change both can replace both. Acceptance is a local workflow guard, not a signed attestation or concurrent-writer transaction.
 

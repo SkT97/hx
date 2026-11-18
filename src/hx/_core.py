@@ -146,14 +146,25 @@ def _run_step(
     """Run one argv without a shell and measure exit code, wall time and output."""
     step = StepResult(argv=[_env.mask_values(arg, mask) for arg in argv])
     start = time.monotonic()
+    longest_secret = max(map(len, mask), default=0)
+    output_limit = 4 * (TAIL_CHARS + longest_secret + 1)
+
+    def captured_tail(raw: bytes | None) -> str:
+        masked = _env.mask_values(_to_str(raw), mask)
+        if raw and len(raw) == output_limit:
+            # A retained suffix might start inside a secret or UTF-8 sequence.
+            # Drop that prefix after masking all complete occurrences.
+            masked = masked[longest_secret + 1 :]
+        return masked[-TAIL_CHARS:]
+
     try:
-        proc = execute(argv, cwd=cwd, env=env, timeout=timeout)
+        proc = execute(argv, cwd=cwd, env=env, timeout=timeout, output_limit=output_limit)
     except subprocess.TimeoutExpired as exc:
         step.timed_out = True
         step.duration_s = time.monotonic() - start
         step.error = f"timed out after {timeout:g}s"
-        step.stdout_tail = _tail(_to_str(exc.stdout), mask)
-        step.stderr_tail = _tail(_to_str(exc.stderr), mask)
+        step.stdout_tail = captured_tail(exc.stdout)
+        step.stderr_tail = captured_tail(exc.stderr)
         return step
     except FileNotFoundError as exc:
         step.duration_s = time.monotonic() - start
@@ -168,8 +179,8 @@ def _run_step(
 
     step.duration_s = time.monotonic() - start
     step.exit_code = proc.returncode
-    step.stdout_tail = _tail(_to_str(proc.stdout), mask)
-    step.stderr_tail = _tail(_to_str(proc.stderr), mask)
+    step.stdout_tail = captured_tail(proc.stdout)
+    step.stderr_tail = captured_tail(proc.stderr)
     return step
 
 
@@ -272,15 +283,27 @@ def run(
     mask = _env.secret_values(names)
 
     agent_step = _run_step(agent_cmd, work_dir, env, seconds, mask)
-    if agent_step.error or agent_step.timed_out or agent_step.exit_code != 0:
+    before_verification: bytes | None = None
+    measure_error: str | None = None
+    if not (agent_step.error or agent_step.timed_out or agent_step.exit_code != 0):
+        try:
+            _git.stage_all(work_dir)
+            before_verification = _git.staged_patch(work_dir, base)
+        except GitError as exc:
+            measure_error = str(exc)
+
+    if before_verification is None:
         verifier_step = StepResult(
             argv=[_env.mask_values(arg, mask) for arg in verifier_cmd], skipped=True
         )
-        verifier_step.error = "skipped: agent did not exit with code 0"
+        verifier_step.error = (
+            "skipped: could not capture the proposed patch"
+            if measure_error
+            else "skipped: agent did not exit with code 0"
+        )
     else:
         verifier_step = _run_step(verifier_cmd, work_dir, env, seconds, mask)
 
-    measure_error: str | None = None
     changed: list[str] = []
     patch = b""
     try:
@@ -294,6 +317,8 @@ def run(
     status = (
         _status(agent_step, verifier_step, changed) if measure_error is None else "workspace_lost"
     )
+    if status in (STATUS_OK, "no_changes") and before_verification != patch:
+        status = "verifier_changed_patch"
     patch_path = run_dir / PATCH_NAME
     patch_path.write_bytes(patch)
     digest = hashlib.sha256(patch).hexdigest()
@@ -322,6 +347,7 @@ def run(
         "change_count": len(changed),
         "patch_file": PATCH_NAME,
         "patch_sha256": digest,
+        "verified_patch_sha256": digest if status == STATUS_OK else None,
         "patch_bytes": len(patch),
         "measure_error": measure_error,
         "accept": {"accepted": False},
@@ -458,6 +484,8 @@ def accept(run_ref: Path | str, runs_root: Path | str | None = None) -> dict[str
         )
     if not patch:
         raise AcceptanceRefused("empty patch: there is nothing to apply")
+    if record.get("verified_patch_sha256") != record.get("patch_sha256"):
+        raise AcceptanceRefused("run lacks patch verification evidence; rerun with this hx version")
 
     source = Path(str(record.get("source_repo")))
     if not source.is_dir() or not _git.is_work_tree(source):
@@ -479,11 +507,10 @@ def accept(run_ref: Path | str, runs_root: Path | str | None = None) -> dict[str
             f"at run time {record.get('source_dirty_files_at_run')}, now {now_dirty}"
         )
 
-    patch_file = run_dir / str(record.get("patch_file", PATCH_NAME))
-    rc, _out, err = _git.apply_patch(source, patch_file, check_only=True)
+    rc, _out, err = _git.apply_patch(source, patch, check_only=True)
     if rc != 0:
         raise AcceptanceRefused(f"git apply --check refused the patch: {err.strip()[:600]}")
-    rc, _out, err = _git.apply_patch(source, patch_file, check_only=False)
+    rc, _out, err = _git.apply_patch(source, patch, check_only=False)
     if rc != 0:
         raise AcceptanceRefused(f"git apply failed: {err.strip()[:600]}")
 

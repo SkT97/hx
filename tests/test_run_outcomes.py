@@ -74,6 +74,26 @@ class RunOutcomeTest(unittest.TestCase):
             hx.accept(res.run_id, runs_root=self.runs)
         self.assertIn("verifier_failed", str(ctx.exception))
 
+    def test_verifier_changes_to_proposed_source_block_accept(self) -> None:
+        verifier = [
+            S.PY,
+            "-c",
+            "from pathlib import Path; "
+            "p = Path('words.py'); p.write_bytes(p.read_bytes() + b'# changed during verification\\n')",
+        ]
+        result = self.do_run(S.AGENT_FIX, verify=verifier)
+        self.assertEqual(result.status, "verifier_changed_patch")
+        self.assertIn("changed during verification", result.patch_path.read_text(encoding="utf-8"))
+        with self.assertRaisesRegex(hx.AcceptanceRefused, "verifier_changed_patch"):
+            hx.accept(result.run_id, runs_root=self.runs)
+
+    def test_verifier_can_create_ignored_build_output(self) -> None:
+        verifier = [S.PY, "-c", "from pathlib import Path; Path('output.pyc').touch()"]
+        result = self.do_run(S.AGENT_FIX, verify=verifier)
+        self.assertTrue(result.passed)
+        self.assertNotIn("output.pyc", result.changed_files)
+        hx.accept(result.run_id, runs_root=self.runs)
+
     def test_agent_failure_skips_verifier_and_blocks_accept(self) -> None:
         before = S.snapshot(self.repo)
         res = self.do_run(S.AGENT_BOOM)

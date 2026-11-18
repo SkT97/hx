@@ -5,7 +5,9 @@ Nothing here runs accept against a repository that already existed.
 
 from __future__ import annotations
 
+import json
 import unittest
+from unittest.mock import patch
 
 import hx
 from hx import _git
@@ -65,6 +67,30 @@ class AcceptTest(unittest.TestCase):
             hx.accept(res.run_id, runs_root=self.runs)
         self.assertIn("digest", str(ctx.exception).lower())
         self.assertNotIn("lower()", (self.repo / "words.py").read_text())
+
+    def test_accept_refuses_legacy_record_without_patch_evidence(self) -> None:
+        res = self.run_ok()
+        record_path = res.run_dir / "run.json"
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record.pop("verified_patch_sha256")
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+
+        with self.assertRaisesRegex(hx.AcceptanceRefused, "lacks patch verification evidence"):
+            hx.accept(res.run_id, runs_root=self.runs)
+        self.assertNotIn("lower()", (self.repo / "words.py").read_text())
+
+    def test_both_git_apply_calls_receive_the_verified_bytes(self) -> None:
+        res = self.run_ok()
+        verified_bytes = res.patch_path.read_bytes()
+        with patch.object(_git.subprocess, "run", wraps=_git.subprocess.run) as run:
+            hx.accept(res.run_id, runs_root=self.runs)
+        apply_calls = [call for call in run.call_args_list if "apply" in call.args[0]]
+        self.assertEqual(len(apply_calls), 2)
+        self.assertIn("--check", apply_calls[0].args[0])
+        self.assertNotIn("--check", apply_calls[1].args[0])
+        for call in apply_calls:
+            self.assertEqual(call.args[0][-1], "-")
+            self.assertEqual(call.kwargs["input"], verified_bytes)
 
     def test_accept_refuses_when_head_moved(self) -> None:
         res = self.run_ok()

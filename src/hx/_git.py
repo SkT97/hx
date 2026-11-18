@@ -37,6 +37,7 @@ def git(
     check: bool = True,
     timeout: float = 600.0,
     binary: bool = False,
+    stdin: bytes | None = None,
 ) -> tuple[int, str | bytes, str | bytes]:
     """Run ``git <args>`` without a shell and return ``(rc, stdout, stderr)``."""
     argv = [GIT, *[str(a) for a in args]]
@@ -46,6 +47,7 @@ def git(
             cwd=str(cwd) if cwd is not None else None,
             env=git_env(),
             capture_output=True,
+            input=stdin,
             timeout=timeout,
         )
     except FileNotFoundError as exc:  # pragma: no cover - depends on the machine
@@ -173,9 +175,9 @@ def staged_names(work: Path, base: str, timeout: float = 600.0) -> list[str]:
 
 
 def apply_patch(
-    repo: Path, patch_file: Path, check_only: bool = False, timeout: float = 600.0
+    repo: Path, patch: bytes, check_only: bool = False, timeout: float = 600.0
 ) -> tuple[int, str, str]:
-    """``git apply`` (or ``--check``) a saved patch. Never stages, commits or pushes."""
+    """``git apply`` (or ``--check``) the supplied bytes. Never stages, commits or pushes."""
     args = [
         "-c",
         "core.autocrlf=false",
@@ -186,6 +188,6 @@ def apply_patch(
     ]
     if check_only:
         args.append("--check")
-    args.append(str(patch_file))
-    rc, out, err = git(args, cwd=repo, check=False, timeout=timeout)
+    args.append("-")
+    rc, out, err = git(args, cwd=repo, check=False, timeout=timeout, stdin=patch)
     return rc, str(out), str(err)

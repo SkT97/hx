@@ -5,12 +5,75 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import BinaryIO
 
 
-def execute(argv: list[str], *, cwd: Path, env: dict[str, str], timeout: float):
+def _capture(
+    proc: subprocess.Popen[bytes],
+    timeout: float,
+    output_limit: int,
+    kill_tree: Callable[[], None],
+) -> subprocess.CompletedProcess[bytes]:
+    """Drain both pipes concurrently while retaining a small byte suffix."""
+    assert proc.stdout is not None and proc.stderr is not None
+    streams = (proc.stdout, proc.stderr)
+    tails = (bytearray(), bytearray())
+    errors: list[OSError] = []
+
+    def read(stream: BinaryIO, tail: bytearray) -> None:
+        try:
+            with stream:
+                while chunk := stream.read1(65536):
+                    tail.extend(chunk)
+                    del tail[: max(0, len(tail) - output_limit)]
+        except OSError as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=read, args=(stream, tail), daemon=True)
+        for stream, tail in zip(streams, tails, strict=True)
+    ]
+
+    def finish(seconds: float) -> None:
+        deadline = time.monotonic() + seconds
+        proc.wait(timeout=seconds)
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                raise subprocess.TimeoutExpired(proc.args, timeout)
+
+    for thread in threads:
+        thread.start()
+    try:
+        finish(timeout)
+    except subprocess.TimeoutExpired:
+        kill_tree()
+        try:
+            finish(5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise subprocess.TimeoutExpired(
+            proc.args, timeout, output=bytes(tails[0]), stderr=bytes(tails[1])
+        ) from None
+    if errors:
+        raise errors[0]
+    return subprocess.CompletedProcess(proc.args, proc.returncode, bytes(tails[0]), bytes(tails[1]))
+
+
+def execute(
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float,
+    output_limit: int = 16384,
+):
     if os.name == "nt":
-        return _windows(argv, cwd, env, timeout)
+        return _windows(argv, cwd, env, timeout, output_limit)
     proc = subprocess.Popen(
         argv,
         cwd=cwd,
@@ -19,21 +82,20 @@ def execute(argv: list[str], *, cwd: Path, env: dict[str, str], timeout: float):
         stderr=subprocess.PIPE,
         start_new_session=True,
     )
-    try:
-        out, err = proc.communicate(timeout=timeout)
-        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        out, err = proc.communicate(timeout=5)
-        raise subprocess.TimeoutExpired(argv, timeout, out, err) from None
-    finally:
+
+    def kill_tree() -> None:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
 
+    try:
+        return _capture(proc, timeout, output_limit, kill_tree)
+    finally:
+        kill_tree()
 
-def _windows(argv, cwd, env, timeout):
+
+def _windows(argv, cwd, env, timeout, output_limit):
     # Start suspended: descendants cannot escape the job before assignment.
     import ctypes as c
     from ctypes import wintypes as w
@@ -155,15 +217,13 @@ def _windows(argv, cwd, env, timeout):
             kernel.CloseHandle(snapshot)
         if not resumed:
             raise OSError("could not resume the job process")
-        try:
-            out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
+
+        def kill_tree() -> None:
             checked(kernel.TerminateJobObject(job, 1))
-            out, err = proc.communicate(timeout=5)
-            raise subprocess.TimeoutExpired(argv, timeout, out, err) from None
-        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+        return _capture(proc, timeout, output_limit, kill_tree)
     finally:
         kernel.CloseHandle(job)
         if proc is not None and proc.poll() is None:
             proc.kill()
-            proc.communicate(timeout=5)
+            proc.wait(timeout=5)

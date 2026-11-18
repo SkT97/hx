@@ -85,6 +85,18 @@ class BoundaryTest(unittest.TestCase):
         self.assertTrue(linked_run.work_dir.is_dir())
         self.assertEqual(len([p.name for p in runs.iterdir()]), 2)
 
+    def test_process_capture_keeps_only_a_bounded_suffix_of_each_stream(self):
+        code = (
+            "import sys; sys.stdout.buffer.write(b'x' * 1048576 + b'out'); "
+            "sys.stderr.buffer.write(b'y' * 1048576 + b'err')"
+        )
+        result = execute([S.PY, "-c", code], cwd=Path.cwd(), env=dict(os.environ), timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertLessEqual(len(result.stdout), 16384)
+        self.assertLessEqual(len(result.stderr), 16384)
+        self.assertTrue(result.stdout.endswith(b"out"))
+        self.assertTrue(result.stderr.endswith(b"err"))
+
     def test_timeout_kills_a_descendant_holding_output_pipes(self):
         with tempfile.TemporaryDirectory() as temporary:
             marker = Path(temporary) / "escaped.txt"
