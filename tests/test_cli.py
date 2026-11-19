@@ -94,6 +94,8 @@ class CliTest(unittest.TestCase):
         no_yes = self.hx("accept", run_id, "--runs-root", str(self.runs))
         self.assertNotEqual(no_yes.returncode, 0)
         self.assertIn("--yes", no_yes.stdout + no_yes.stderr)
+        self.assertIn("target :", no_yes.stdout)
+        self.assertIn("words.py", no_yes.stdout)
 
         accepted = self.hx("accept", run_id, "--yes", "--runs-root", str(self.runs))
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)

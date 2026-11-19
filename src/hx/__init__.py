@@ -20,6 +20,7 @@ Isolation is git-level (fresh clone, push disabled, private HOME, allowlisted
 environment) plus human review. It is **not** an OS security boundary.
 """
 
+from ._attest import attest_run, check_run
 from ._core import (
     AcceptanceRefused,
     HxError,
@@ -29,6 +30,7 @@ from ._core import (
     default_runs_root,
     inspect_run,
     patch_text,
+    preflight_run,
     run,
 )
 from ._demo import demo
@@ -42,9 +44,12 @@ __all__ = [
     "StepResult",
     "__version__",
     "accept",
+    "attest_run",
+    "check_run",
     "default_runs_root",
     "demo",
     "inspect_run",
     "patch_text",
+    "preflight_run",
     "run",
 ]

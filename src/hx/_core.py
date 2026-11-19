@@ -20,6 +20,7 @@ import json
 import math
 import os
 import secrets
+import shutil
 import subprocess
 import time
 from collections.abc import Sequence
@@ -203,6 +204,109 @@ def _status(agent: StepResult, verifier: StepResult, changed: list[str]) -> str:
     return STATUS_OK
 
 
+def preflight_run(
+    repo: Path | str,
+    agent_argv: Sequence[str],
+    verify_argv: Sequence[str],
+    timeout: float = 900.0,
+    runs_root: Path | str | None = None,
+    pass_env: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Check everything :func:`run` needs, without cloning or running anything."""
+    checks: list[dict[str, Any]] = []
+    detail: dict[str, Any] = {}
+
+    def attempt(name: str, check) -> None:
+        try:
+            note = check()
+            checks.append({"name": name, "ok": True, "detail": note or ""})
+        except (HxError, GitError, TypeError, ValueError) as exc:
+            checks.append({"name": name, "ok": False, "detail": str(exc)})
+
+    def argv_check(label: str, argv: Sequence[str]):
+        def check() -> str:
+            detail[label] = _normalize_argv(argv, label)
+            return " ".join(_env.redact_argv(detail[label]))
+
+        return check
+
+    def executable_check(label: str):
+        def check() -> str:
+            program = detail[label][0]
+            found = shutil.which(program) or (program if Path(program).is_file() else None)
+            if not found:
+                raise HxError(f"{program!r} was not found on PATH")
+            return str(found)
+
+        return check
+
+    def timeout_check() -> str:
+        seconds = float(timeout)
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise HxError(f"timeout must be a positive number of seconds, got {timeout!r}")
+        return f"{seconds:g} s for each process"
+
+    def pass_env_check() -> str:
+        return ", ".join(_env.validate_pass_env(pass_env)) or "none (default allowlist only)"
+
+    def source_check() -> str:
+        detail["source"], base = _prepare_source(repo)
+        return f"clean at {base[:12]}"
+
+    def runs_root_check() -> str:
+        root = (Path(runs_root).expanduser() if runs_root else default_runs_root()).resolve()
+        source = detail.get("source")
+        if source is None:
+            raise HxError("cannot be judged without a valid source repository")
+        if root == source or source in root.parents:
+            raise HxError("runs_root must be outside the source repository")
+        return str(root)
+
+    def git_check() -> str:
+        version = _git.git_version()
+        if version is None or version < _git.MIN_GIT_VERSION:
+            needed = ".".join(map(str, _git.MIN_GIT_VERSION))
+            raise HxError(f"hx accept needs git {needed} or newer")
+        return ".".join(map(str, version))
+
+    attempt("agent_argv", argv_check("agent", agent_argv))
+    attempt("verifier_argv", argv_check("verifier", verify_argv))
+    attempt("timeout", timeout_check)
+    attempt("pass_env", pass_env_check)
+    attempt("source_repo", source_check)
+    attempt("runs_root", runs_root_check)
+    if "agent" in detail:
+        attempt("agent_executable", executable_check("agent"))
+    if "verifier" in detail:
+        attempt("verifier_executable", executable_check("verifier"))
+    attempt("git_version", git_check)
+    return {"ok": all(c["ok"] for c in checks), "checks": checks}
+
+
+def _prepare_source(repo: Path | str) -> tuple[Path, str]:
+    """The resolved repository root and its HEAD, or an error if a run cannot start."""
+    source = Path(repo).expanduser()
+    if not source.is_dir():
+        raise HxError(f"source path is not a directory: {source}")
+    source = source.resolve()
+    top = _git.work_tree_root(source)
+    if top is None:
+        raise HxError(f"not a git work tree: {source}")
+    if top != source:
+        raise HxError(
+            f"{source} is a subdirectory of the git work tree at {top}: hx runs on the "
+            "repository root so the isolated clone covers the whole checkout"
+        )
+    try:
+        base = _git.head_sha(source)
+    except GitError as exc:
+        raise HxError(f"{source} has no commit to base the run on: {exc}") from exc
+    dirty = _git.dirty_paths(source)
+    if dirty:
+        raise HxError("source repository must be clean before a run")
+    return source, base
+
+
 def run(
     repo: Path | str,
     agent_argv: Sequence[str],
@@ -238,25 +342,8 @@ def run(
     if not math.isfinite(seconds) or seconds <= 0:
         raise HxError(f"timeout must be a positive number of seconds, got {timeout!r}")
 
-    source = Path(repo).expanduser()
-    if not source.is_dir():
-        raise HxError(f"source path is not a directory: {source}")
-    source = source.resolve()
-    top = _git.work_tree_root(source)
-    if top is None:
-        raise HxError(f"not a git work tree: {source}")
-    if top != source:
-        raise HxError(
-            f"{source} is a subdirectory of the git work tree at {top}: hx runs on the "
-            "repository root so the isolated clone covers the whole checkout"
-        )
-    try:
-        base = _git.head_sha(source)
-    except GitError as exc:
-        raise HxError(f"{source} has no commit to base the run on: {exc}") from exc
-    dirty = _git.dirty_paths(source)
-    if dirty:
-        raise HxError("source repository must be clean before a run")
+    source, base = _prepare_source(repo)
+    dirty: list[str] = []  # a run only starts on a clean source
 
     root = (Path(runs_root).expanduser() if runs_root else default_runs_root()).resolve()
     if root == source or source in root.parents:
@@ -442,6 +529,38 @@ def patch_text(run_ref: Path | str, runs_root: Path | str | None = None) -> str:
     return check_patch_digest(run_dir, record).decode("utf-8", errors="replace")
 
 
+def _check_git_version() -> None:
+    version = _git.git_version()
+    if version is None or version < _git.MIN_GIT_VERSION:
+        needed = ".".join(map(str, _git.MIN_GIT_VERSION))
+        found = ".".join(map(str, version)) if version else "unknown"
+        raise AcceptanceRefused(f"accept needs git {needed} or newer (found {found})")
+
+
+def _check_patch_paths(source: Path, patch: bytes, changed: object) -> None:
+    """Refuse a patch that touches anything outside the recorded change set."""
+    allowed = set(changed) if isinstance(changed, list) else set()
+    if _git.has_rename_or_copy(patch):
+        raise AcceptanceRefused("the patch contains a rename or copy, which hx never records")
+    try:
+        paths = _git.patch_paths(source, patch)
+    except GitError as exc:
+        raise AcceptanceRefused(str(exc)) from exc
+    for path in paths:
+        parts = path.replace("\\", "/").split("/")
+        unsafe = (
+            path.startswith(("/", "\\"))
+            or (len(path) > 1 and path[1] == ":")
+            or any(part in ("", "..") or part.lower() == ".git" for part in parts)
+        )
+        if unsafe:
+            raise AcceptanceRefused(f"the patch touches an unsafe path: {path!r}")
+        if path not in allowed:
+            raise AcceptanceRefused(
+                f"the patch touches {path!r}, which is not in the recorded changed files"
+            )
+
+
 def accept(run_ref: Path | str, runs_root: Path | str | None = None) -> dict[str, Any]:
     """Apply a reviewed patch to its source repository. The only write hx performs.
 
@@ -507,6 +626,8 @@ def accept(run_ref: Path | str, runs_root: Path | str | None = None) -> dict[str
             f"at run time {record.get('source_dirty_files_at_run')}, now {now_dirty}"
         )
 
+    _check_git_version()
+    _check_patch_paths(source, patch, record.get("changed_files"))
     rc, _out, err = _git.apply_patch(source, patch, check_only=True)
     if rc != 0:
         raise AcceptanceRefused(f"git apply --check refused the patch: {err.strip()[:600]}")

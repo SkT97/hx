@@ -5,6 +5,7 @@ Nothing here runs accept against a repository that already existed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from unittest.mock import patch
@@ -84,7 +85,11 @@ class AcceptTest(unittest.TestCase):
         verified_bytes = res.patch_path.read_bytes()
         with patch.object(_git.subprocess, "run", wraps=_git.subprocess.run) as run:
             hx.accept(res.run_id, runs_root=self.runs)
-        apply_calls = [call for call in run.call_args_list if "apply" in call.args[0]]
+        apply_calls = [
+            call
+            for call in run.call_args_list
+            if "apply" in call.args[0] and "--numstat" not in call.args[0]
+        ]
         self.assertEqual(len(apply_calls), 2)
         self.assertIn("--check", apply_calls[0].args[0])
         self.assertNotIn("--check", apply_calls[1].args[0])
@@ -145,3 +150,105 @@ class AcceptTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _new_file_patch(path: str) -> str:
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        f"+++ b/{path}\n"
+        "@@ -0,0 +1 @@\n"
+        "+owned\n"
+    )
+
+
+class AcceptPathGuardTest(unittest.TestCase):
+    """A forged record and patch must not widen what accept writes."""
+
+    def setUp(self) -> None:
+        self.sb = S.Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.repo = self.sb.new_repo()
+        self.runs = self.sb.runs_root()
+
+    def run_ok(self):
+        return hx.run(
+            self.repo,
+            [S.PY, str(self.sb.script("a.py", S.AGENT_FIX))],
+            S.VERIFY_UNITTEST,
+            timeout=180,
+            runs_root=self.runs,
+        )
+
+    def forge(self, res, patch_text: str, changed: list[str] | None = None) -> None:
+        data = patch_text.encode("utf-8")
+        res.patch_path.write_bytes(data)
+        record_path = res.run_dir / "run.json"
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        digest = hashlib.sha256(data).hexdigest()
+        record["patch_sha256"] = digest
+        record["verified_patch_sha256"] = digest
+        if changed is not None:
+            record["changed_files"] = changed
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    def refuses(self, path: str, message: str) -> None:
+        res = self.run_ok()
+        self.forge(res, _new_file_patch(path))
+        with self.assertRaisesRegex(hx.AcceptanceRefused, message):
+            hx.accept(res.run_id, runs_root=self.runs)
+        _, porcelain, _ = _git.git(["status", "--porcelain"], cwd=self.repo)
+        self.assertEqual(porcelain.strip(), "")
+
+    def test_refuses_path_outside_recorded_changes(self) -> None:
+        self.refuses("evil.txt", "not in the recorded changed files")
+
+    def test_refuses_dotdot_path(self) -> None:
+        self.refuses("../evil.txt", "")
+
+    def test_refuses_git_directory_path(self) -> None:
+        self.refuses(".git/hooks/pre-commit", "")
+
+    def test_refuses_absolute_path(self) -> None:
+        self.refuses("/tmp/evil.txt", "")
+
+    def test_refuses_old_git(self) -> None:
+        res = self.run_ok()
+        with patch.object(_git, "git_version", return_value=(2, 31)):
+            with self.assertRaisesRegex(hx.AcceptanceRefused, "git 2.32 or newer"):
+                hx.accept(res.run_id, runs_root=self.runs)
+        self.assertNotIn("lower()", (self.repo / "words.py").read_text())
+
+    def test_refuses_unreadable_git_version(self) -> None:
+        res = self.run_ok()
+        with patch.object(_git, "git_version", return_value=None):
+            with self.assertRaisesRegex(hx.AcceptanceRefused, "unknown"):
+                hx.accept(res.run_id, runs_root=self.runs)
+
+    def test_refuses_rename_in_a_forged_patch(self) -> None:
+        res = self.run_ok()
+        self.forge(
+            res,
+            "diff --git a/README.md b/words.py\n"
+            "similarity index 100%\n"
+            "rename from README.md\n"
+            "rename to words.py\n",
+        )
+        with self.assertRaisesRegex(hx.AcceptanceRefused, "rename or copy"):
+            hx.accept(res.run_id, runs_root=self.runs)
+        self.assertTrue((self.repo / "README.md").is_file())
+
+    def test_the_older_rename_headers_are_refused_too(self) -> None:
+        res = self.run_ok()
+        self.forge(
+            res,
+            "diff --git a/README.md b/ok2.txt\n"
+            "similarity index 100%\n"
+            "rename old README.md\n"
+            "rename new ok2.txt\n",
+        )
+        with self.assertRaisesRegex(hx.AcceptanceRefused, "rename or copy"):
+            hx.accept(res.run_id, runs_root=self.runs)
+        self.assertTrue((self.repo / "README.md").is_file())
+        self.assertFalse((self.repo / "ok2.txt").exists())

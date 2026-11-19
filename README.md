@@ -10,6 +10,8 @@ Requires Python 3.12+, Git and [uv](https://docs.astral.sh/uv/). From this repos
 uv run --locked hx demo
 ```
 
+Without cloning, `uvx --from git+https://github.com/SkT97/hx hx demo` runs the current main branch.
+
 The offline demo creates a disposable Git fixture, blocks an agent that only claims success, verifies a real fix and explicitly applies it to that fixture. It uses a deterministic fake agent; no model, API key or existing repository is involved.
 
 <picture>
@@ -28,6 +30,10 @@ A failed verifier blocks acceptance. hx compares the Git patch before and after 
 
 Review the verified patch before applying it. Both Git apply calls use the same digest-checked bytes. To accept a run recorded by an older version, rerun verification with this version. Git clone isolation does not sandbox the agent.
 
+`hx check RUN` recomputes the patch digest, the status implied by the recorded exits and the file list implied by the patch. `hx attest RUN` prints an unsigned [in-toto](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md) statement for a run that passes. See [attestation](docs/attestation.md).
+
+`hx run REPO --preflight -- ...` checks a run without starting it, and `hx run --json` prints a versioned result. Exit codes, statuses and the schema are in [result](docs/result.md).
+
 <details>
 <summary>Run your own agent and review a patch</summary>
 
@@ -40,7 +46,7 @@ uv run --locked hx accept RUN_ID --yes
 
 The two `--` separators delimit argument vectors. Commands are executed without a shell. The source must be clean and the run directory must be outside it. Pass an environment variable deliberately with `--pass-env NAME`; the default environment is allowlisted, with private HOME and temporary directories.
 
-`accept` refuses failed or timed-out verification, an empty or modified patch, a changed source HEAD, and a dirty target. It applies an uncommitted patch; you own staging, commits and publication.
+`accept` refuses failed or timed-out verification, an empty or modified patch, a patch that touches a path outside the recorded changed files or inside `.git`, a changed source HEAD, a dirty target, and a git older than 2.32. It applies an uncommitted patch; you own staging, commits and publication.
 
 </details>
 

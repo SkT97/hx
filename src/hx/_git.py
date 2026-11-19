@@ -9,6 +9,7 @@ hx's own git commands do.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -161,17 +162,70 @@ def stage_all(work: Path, timeout: float = 600.0) -> None:
 
 
 def staged_patch(work: Path, base: str, timeout: float = 600.0) -> bytes:
-    _, out, _ = git(["diff", "--cached", "--binary", base], cwd=work, timeout=timeout, binary=True)
+    _, out, _ = git(
+        ["diff", "--cached", "--binary", "--no-renames", base],
+        cwd=work,
+        timeout=timeout,
+        binary=True,
+    )
     return out  # type: ignore[return-value]
 
 
 def staged_names(work: Path, base: str, timeout: float = 600.0) -> list[str]:
     _, out, _ = git(
-        ["-c", "core.quotepath=false", "diff", "--cached", "--name-only", base],
+        ["-c", "core.quotepath=false", "diff", "--cached", "--name-only", "--no-renames", base],
         cwd=work,
         timeout=timeout,
     )
     return [line for line in str(out).splitlines() if line.strip()]
+
+
+#: Older ``git apply`` does not refuse paths that leave the work tree or enter ``.git``.
+MIN_GIT_VERSION = (2, 32)
+
+
+def git_version() -> tuple[int, int] | None:
+    """``(major, minor)`` of the installed git, or ``None`` if it cannot be read."""
+    rc, out, _ = git(["--version"], check=False)
+    match = re.match(r"git version (\d+)\.(\d+)", str(out))
+    return (int(match[1]), int(match[2])) if rc == 0 and match else None
+
+
+def has_rename_or_copy(patch: bytes) -> bool:
+    """Whether any header line of the patch starts a rename or a copy.
+
+    ``git apply`` reads several spellings (``rename from``, ``rename old``, ``copy
+    to`` and others) and ``--numstat`` reports only the new name of a rename, so
+    the old file would go unchecked. Body lines of a diff start with a space,
+    ``+``, ``-`` or a backslash, so a line starting with these words is a header.
+    """
+    return any(line.startswith((b"rename ", b"copy ")) for line in patch.splitlines())
+
+
+def patch_paths(repo: Path, patch: bytes, timeout: float = 600.0) -> list[str]:
+    """Paths a patch touches, as git itself reads them (``git apply --numstat -z``).
+
+    A pure rename or copy reports only its new name, so callers must refuse those
+    separately. Raises :class:`GitError` when git cannot parse the patch.
+    """
+    rc, out, err = git(
+        ["apply", "--numstat", "-z", "-p1", "-"],
+        cwd=repo,
+        check=False,
+        timeout=timeout,
+        stdin=patch,
+    )
+    if rc != 0:
+        raise GitError(f"git apply --numstat could not read the patch: {str(err).strip()[:400]}")
+    paths = []
+    for entry in str(out).split("\0"):
+        if not entry:
+            continue
+        fields = entry.split("\t", 2)
+        if len(fields) != 3 or not fields[2]:
+            raise GitError("unexpected git apply --numstat output")
+        paths.append(fields[2])
+    return paths
 
 
 def apply_patch(
